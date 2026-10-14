@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Float64MultiArray
+from sensor_msgs.msg import JointState
+import tkinter as tk
+from tkinter import Scale, Label, Button, Frame, HORIZONTAL, LabelFrame
+import threading
+
+
+class JointControllerGUI(Node):
+    def __init__(self):
+        super().__init__('joint_controller_gui')
+        
+        # Publisher for joint commands
+        self.cmd_publisher = self.create_publisher(
+            Float64MultiArray,
+            '/arm_controller/commands',
+            10
+        )
+        
+        # Subscriber for joint states
+        self.joint_state_subscriber = self.create_subscription(
+            JointState,
+            '/joint_states',
+            self.joint_state_callback,
+            10
+        )
+        
+        # Joint names in order (must match controller config)
+        self.joint_names = [
+            'shoulder_joint',
+            'elbow_joint',
+            'wrist_joint',
+            'gripper_yaw_joint',
+            'left_finger_joint',
+            'right_finger_joint'
+        ]
+        
+        # Current joint positions from /joint_states
+        self.current_positions = {name: 0.0 for name in self.joint_names}
+        
+        # Target positions (from sliders)
+        self.target_positions = {name: 0.0 for name in self.joint_names}
+        
+        # Tkinter GUI
+        self.root = tk.Tk()
+        self.root.title('Joint Controller - Manual Mode')
+        self.root.geometry('700x700')
+        self.root.configure(bg='#1e1e1e')
+        
+        # Create widgets
+        self.create_widgets()
+        
+        # Timer to publish commands at 50 Hz
+        self.timer = self.create_timer(0.02, self.publish_commands)
+        
+    def create_widgets(self):
+        """Create the GUI sliders and labels."""
+        
+        # Main container
+        main_frame = Frame(self.root, bg='#1e1e1e', padx=15, pady=15)
+        main_frame.pack(fill='both', expand=True)
+        
+        # ===== TITLE =====
+        title_label = Label(
+            main_frame, 
+            text='Joint Controller - Manual Control',
+            font=('Arial', 18, 'bold'),
+            bg='#1e1e1e',
+            fg='#00ff88'
+        )
+        title_label.pack(pady=10)
+        
+        # ===== SLIDERS SECTION =====
+        sliders_frame = LabelFrame(
+            main_frame,
+            text='Joint Controls',
+            font=('Arial', 12, 'bold'),
+            bg='#2d2d2d',
+            fg='#00ff88',
+            padx=10,
+            pady=10
+        )
+        sliders_frame.pack(fill='both', expand=True, pady=10)
+        
+        self.slider_frames = {}
+        self.value_labels = {}
+        self.sliders = {}
+        
+        for i, joint_name in enumerate(self.joint_names):
+            # Frame for this joint
+            joint_frame = Frame(sliders_frame, bg='#2d2d2d')
+            joint_frame.pack(fill='x', pady=8)
+            
+            # Joint name and value on same row
+            info_frame = Frame(joint_frame, bg='#2d2d2d')
+            info_frame.pack(fill='x', padx=5)
+            
+            name_label = Label(
+                info_frame,
+                text=f'{joint_name}',
+                font=('Arial', 10, 'bold'),
+                bg='#2d2d2d',
+                fg='#ffffff',
+                width=20,
+                anchor='w'
+            )
+            name_label.pack(side='left')
+            
+            value_label = Label(
+                info_frame,
+                text='0.00 rad',
+                font=('Arial', 9),
+                bg='#2d2d2d',
+                fg='#00ff88',
+                width=12,
+                anchor='e'
+            )
+            value_label.pack(side='right')
+            self.value_labels[joint_name] = value_label
+            
+            # Slider
+            slider = Scale(
+                joint_frame,
+                from_=-3.14,
+                to=3.14,
+                resolution=0.01,
+                orient=HORIZONTAL,
+                length=600,
+                command=lambda val, idx=i: self.on_slider_change(idx, val),
+                bg='#3d3d3d',
+                fg='#00ff88',
+                activebackground='#00ff88',
+                troughcolor='#1e1e1e',
+                highlightbackground='#2d2d2d'
+            )
+            slider.set(0.0)
+            slider.pack(fill='x', padx=5, pady=5)
+            self.sliders[joint_name] = slider
+        
+        # ===== STATUS SECTION =====
+        status_frame = LabelFrame(
+            main_frame,
+            text='Current Joint Positions',
+            font=('Arial', 11, 'bold'),
+            bg='#2d2d2d',
+            fg='#00ff88',
+            padx=10,
+            pady=10
+        )
+        status_frame.pack(fill='x', pady=10)
+        
+        self.status_label = Label(
+            status_frame,
+            text='Waiting for joint states...',
+            font=('Courier', 9),
+            bg='#2d2d2d',
+            fg='#00ff88',
+            justify='left',
+            anchor='w'
+        )
+        self.status_label.pack(fill='x', padx=5, pady=5)
+        
+        # ===== BUTTONS SECTION =====
+        button_frame = Frame(main_frame, bg='#1e1e1e')
+        button_frame.pack(pady=15)
+        
+        home_button = Button(
+            button_frame,
+            text='Home (Reset to 0.0)',
+            command=self.home_joints,
+            font=('Arial', 11, 'bold'),
+            bg='#00ff88',
+            fg='#000000',
+            padx=15,
+            pady=8,
+            cursor='hand2'
+        )
+        home_button.pack(side='left', padx=5)
+        
+        # ===== INFO =====
+        info_label = Label(
+            main_frame,
+            text='Drag sliders to control joints • Press Home to reset all to 0.0',
+            font=('Arial', 9),
+            bg='#1e1e1e',
+            fg='#888888'
+        )
+        info_label.pack(pady=5)
+        
+    def on_slider_change(self, joint_index, value):
+        """Called when a slider is moved."""
+        joint_name = self.joint_names[joint_index]
+        self.target_positions[joint_name] = float(value)
+        
+        # Update the value label
+        self.value_labels[joint_name].config(text=f'{float(value):.2f} rad')
+    
+    def home_joints(self):
+        """Reset all joints to 0.0."""
+        for joint_name in self.joint_names:
+            self.target_positions[joint_name] = 0.0
+            self.sliders[joint_name].set(0.0)
+            self.value_labels[joint_name].config(text='0.00 rad')
+    
+    def joint_state_callback(self, msg):
+        """Update current positions from /joint_states and display status."""
+        for i, name in enumerate(msg.name):
+            if name in self.joint_names:
+                self.current_positions[name] = msg.position[i]
+        
+        # Update status label with current positions
+        status_text = "Current positions:\n"
+        for joint_name in self.joint_names:
+            pos = self.current_positions[joint_name]
+            status_text += f"  {joint_name:20s}: {pos:7.2f} rad\n"
+        
+        self.status_label.config(text=status_text)
+    
+    def publish_commands(self):
+        """Publish joint commands at 50 Hz."""
+        # Build command array in joint order
+        cmd_array = []
+        for joint_name in self.joint_names:
+            cmd_array.append(self.target_positions[joint_name])
+        
+        # Publish
+        msg = Float64MultiArray()
+        msg.data = cmd_array
+        self.cmd_publisher.publish(msg)
+    
+    def run(self):
+        """Run the GUI in the main thread and ROS spin in a background thread."""
+        # Spin ROS in a background thread
+        spin_thread = threading.Thread(target=self.spin_thread, daemon=True)
+        spin_thread.start()
+        
+        # Run Tkinter in the main thread
+        self.root.mainloop()
+    
+    def spin_thread(self):
+        """Background thread to spin the ROS node."""
+        rclpy.spin(self)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    gui_node = JointControllerGUI()
+    gui_node.run()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

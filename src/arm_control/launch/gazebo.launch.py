@@ -1,0 +1,54 @@
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription, RegisterEventHandler, TimerAction
+from launch.event_handlers import OnProcessExit
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    pkg = get_package_share_directory('arm_control')
+    gazebo_pkg = get_package_share_directory('gazebo_ros')
+
+    urdf_file = os.path.join(pkg, 'urdf', 'simple_arm.urdf')
+    world_file = os.path.join(pkg, 'worlds', 'pick_place.world')
+
+    with open(urdf_file, 'r') as f:
+        robot_desc = f.read()
+
+    gazebo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(gazebo_pkg, 'launch', 'gazebo.launch.py')),
+        launch_arguments={'world': world_file}.items())
+
+    rsp = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        parameters=[{'robot_description': robot_desc, 'use_sim_time': True}],
+        output='screen')
+
+    spawn = Node(
+        package='gazebo_ros',
+        executable='spawn_entity.py',
+        arguments=['-entity', 'simple_arm', '-topic', 'robot_description'],
+        output='screen')
+
+    jsb = Node(package='controller_manager', executable='spawner',
+               arguments=['joint_state_broadcaster'], output='screen')
+    arm = Node(package='controller_manager', executable='spawner',
+               arguments=['arm_controller'], output='screen')
+    grip = Node(package='controller_manager', executable='spawner',
+                arguments=['gripper_controller'], output='screen')
+
+    # 1) start Gazebo and robot_state_publisher
+    # 2) wait 10 s so the world is fully loaded, then spawn the robot
+    # 3) when spawn finishes, wait 5 s, then load the 3 controllers
+    delayed_spawn = TimerAction(period=10.0, actions=[spawn])
+    after_spawn = RegisterEventHandler(
+        OnProcessExit(target_action=spawn,
+                      on_exit=[TimerAction(period=5.0, actions=[jsb])]))
+    after_jsb = RegisterEventHandler(
+        OnProcessExit(target_action=jsb, on_exit=[arm, grip]))
+
+    return LaunchDescription([gazebo, rsp, delayed_spawn, after_spawn, after_jsb])
